@@ -10,9 +10,10 @@ import { BUSY_STATUS_LEASE_MS } from '../status.js'
 import { notifyMessage, computeMessageRecipients } from '../push.js'
 import { randomUUID, randomBytes, createHash, timingSafeEqual } from 'node:crypto'
 import {
-  deleteSession, authMiddleware, type AuthedRequest,
+  deleteSession, authMiddleware, createSession, type AuthedRequest,
   audit, createWsTicket, gravatarUrlForEmail,
 } from '../auth.js'
+import { verifyLocalPassword } from '../local-auth.js'
 import { joinAllHands, onboardStarterAgents, seedMemberDms } from '../onboardCompany.js'
 import {
   type Provider, providerEnabled, createState, consumeState,
@@ -117,6 +118,28 @@ function requireAuth(req: Request & AuthedRequest): string {
  *  Auth is now enforced everywhere — no more dev-mode header spoofing. */
 function userId(req: Request & AuthedRequest): string {
   return requireAuth(req)
+}
+
+const LOCAL_LOGIN_WINDOW_MINUTES = 15
+const LOCAL_LOGIN_MAX_FAILURES = 8
+
+async function localLoginRateLimited(attemptKey: string): Promise<boolean> {
+  const { rows } = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+       FROM auth_attempts
+      WHERE email = $1
+        AND success = FALSE
+        AND created_at > NOW() - ($2 * INTERVAL '1 minute')`,
+    [attemptKey, LOCAL_LOGIN_WINDOW_MINUTES],
+  )
+  return Number(rows[0]?.count ?? '0') >= LOCAL_LOGIN_MAX_FAILURES
+}
+
+async function recordLocalLoginAttempt(attemptKey: string, ip: string | null, success: boolean, reason: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO auth_attempts (email, ip, success, reason) VALUES ($1, $2, $3, $4)`,
+    [attemptKey, ip, success, reason],
+  )
 }
 
 /** Resolve the calling Computer daemon from its device-token Bearer header,
@@ -597,9 +620,9 @@ api.get('/public/signup-config', async (_req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=30')
   try {
     const waitlistEnabled = await isWaitlistEnabled()
-    res.json({ waitlist_enabled: waitlistEnabled })
+    res.json({ waitlist_enabled: waitlistEnabled, local_password_enabled: env.LOCAL_AUTH_ENABLED })
   } catch {
-    res.json({ waitlist_enabled: false })
+    res.json({ waitlist_enabled: false, local_password_enabled: env.LOCAL_AUTH_ENABLED })
   }
 })
 
@@ -637,7 +660,51 @@ api.get('/metrics', async (req, res) => {
   res.send(renderProm())
 })
 
-/* ============== Auth — OAuth only (Google + GitHub) ============== */
+/* ============== Auth — OAuth plus optional personal local login ============== */
+
+/** Personal deployments can expose exactly one environment-configured account.
+ * No self-service registration is available through this route. */
+api.post('/auth/local/login', safe(async (req, res) => {
+  if (!env.LOCAL_AUTH_ENABLED) {
+    res.status(404).json({ error: 'local password login is disabled' })
+    return
+  }
+
+  const username = typeof req.body?.username === 'string' ? req.body.username.trim().slice(0, 80) : ''
+  const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 512) : ''
+  const attemptKey = `local:${username.toLowerCase()}`
+  const ip = req.socket.remoteAddress ?? null
+  const userAgent = (req.headers['user-agent'] as string | undefined) ?? null
+
+  if (await localLoginRateLimited(attemptKey)) {
+    res.status(429).json({ error: 'too many failed attempts; try again later' })
+    return
+  }
+
+  const { rows } = await pool.query<{ id: string; email: string; display_name: string; password_hash: string | null }>(
+    `SELECT id, email, display_name, password_hash FROM users WHERE id = 'yetone'`,
+  )
+  const user = rows[0]
+  const valid = username === env.LOCAL_AUTH_USERNAME
+    && Boolean(user?.password_hash)
+    && await verifyLocalPassword(password, user.password_hash as string)
+
+  if (!valid || !user) {
+    await recordLocalLoginAttempt(attemptKey, ip, false, 'bad_password')
+    await audit({ kind: 'login_failed', ip, userAgent, detail: { provider: 'local', username } })
+    res.status(401).json({ error: 'invalid username or password' })
+    return
+  }
+
+  await recordLocalLoginAttempt(attemptKey, ip, true, 'ok')
+  const { token } = await createSession(user.id, { ip: ip ?? undefined, ua: userAgent ?? undefined })
+  await audit({ kind: 'login', userId: user.id, companyId: 'personal', ip, userAgent, detail: { provider: 'local' } })
+  res.json({
+    token,
+    user: { id: user.id, email: user.email, displayName: user.display_name },
+    companyId: 'personal',
+  })
+}))
 
 /** 302 to the provider's consent screen. State is opaque to the client —
  *  we mint it server-side, save to Redis (5min TTL), and verify on the

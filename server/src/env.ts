@@ -35,6 +35,13 @@ export const env = {
   DATABASE_URL: required('DATABASE_URL', `postgres://${process.env.USER ?? 'postgres'}@localhost:5432/cumora`),
   REDIS_URL: required('REDIS_URL', 'redis://localhost:6379'),
   OPENAI_API_KEY: required('OPENAI_API_KEY'),
+  /** A single personal account. Both values must be set to expose password login. */
+  LOCAL_AUTH_USERNAME: process.env.CUMORA_LOCAL_AUTH_USERNAME?.trim() ?? '',
+  LOCAL_AUTH_PASSWORD: process.env.CUMORA_LOCAL_AUTH_PASSWORD ?? '',
+  LOCAL_AUTH_ENABLED: Boolean(
+    process.env.CUMORA_LOCAL_AUTH_USERNAME?.trim()
+    && process.env.CUMORA_LOCAL_AUTH_PASSWORD,
+  ),
   /**
    * "Brain" model — the agent's main reasoning loop and convene speech.
    * Default model used when an agent's `participants.model` is NULL.

@@ -737,6 +737,7 @@ export interface ShippingOverview {
 
 export const api = {
   health: () => http<{ ok: boolean; ts: number }>('/health'),
+  authConfig: () => http<{ waitlist_enabled: boolean; local_password_enabled: boolean }>('/public/signup-config'),
   me: () => http<{ id: string; name: string; kind: string }>('/me'),
   /** Full-page redirect into the provider's consent screen. Use
    *  `window.location.assign(api.authStartUrl('google'))` rather than
@@ -770,6 +771,11 @@ export const api = {
         name: input.name ?? null,
         inviteToken: input.inviteToken ?? null,
       }),
+    }),
+  authLocalLogin: (input: { username: string; password: string }) =>
+    http<{ token: string; user: { id: string; email: string; displayName: string }; companyId: string | null }>('/auth/local/login', {
+      method: 'POST',
+      body: JSON.stringify(input),
     }),
   authMe: () =>
     http<MeResponse>('/auth/me'),

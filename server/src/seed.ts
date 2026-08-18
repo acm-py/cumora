@@ -1,28 +1,49 @@
 import { pool } from './db/pool.js'
+import { env } from './env.js'
+import { hashLocalPassword } from './local-auth.js'
 
 /**
  * Ensure the placeholder 'yetone' user row exists so FK references from
- * seeded participants / conversations stay valid on a fresh DB. The row
- * has NO password and NO linked OAuth identity, so no one can log in as
- * it — it's purely a referential anchor for the demo data. On first
- * OAuth login, a separate `u-<uuid>` user is created with the real email.
+ * seeded participants / conversations stay valid on a fresh DB. A personal
+ * deployment can opt into one local account through CUMORA_LOCAL_AUTH_*;
+ * otherwise this remains an unloggable referential anchor.
  */
 async function ensureDevUser(): Promise<void> {
   const DEV_USER_ID = 'yetone'
   const DEV_EMAIL = 'yetone@dev.local'
   const { rows } = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [DEV_USER_ID])
-  if (rows[0]) return
-  await pool.query(
-    `INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, NULL)
-     ON CONFLICT (id) DO NOTHING`,
-    [DEV_USER_ID, DEV_EMAIL, 'Yetone'],
-  )
+  if (!rows[0]) {
+    await pool.query(
+      `INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, NULL)
+       ON CONFLICT (id) DO NOTHING`,
+      [DEV_USER_ID, DEV_EMAIL, 'Yetone'],
+    )
+  }
+  if (env.LOCAL_AUTH_ENABLED) {
+    const username = env.LOCAL_AUTH_USERNAME
+    const passwordHash = await hashLocalPassword(env.LOCAL_AUTH_PASSWORD)
+    await pool.query(
+      `UPDATE users
+          SET email = $2, display_name = $3, password_hash = $4, email_verified_at = COALESCE(email_verified_at, NOW())
+        WHERE id = $1`,
+      [DEV_USER_ID, `local-${username}@cumora.invalid`, username, passwordHash],
+    )
+  }
   await pool.query(
     `INSERT INTO company_members (company_id, user_id, role) VALUES ('personal', $1, 'owner')
      ON CONFLICT DO NOTHING`,
     [DEV_USER_ID],
   )
-  console.log(`[seed] placeholder 'yetone' user created (FK anchor for demo data; no login)`)
+  if (!rows[0]) console.log(`[seed] placeholder 'yetone' user created (FK anchor for demo data)`)
+}
+
+async function syncLocalParticipant(): Promise<void> {
+  if (!env.LOCAL_AUTH_ENABLED) return
+  const username = env.LOCAL_AUTH_USERNAME
+  await pool.query(
+    `UPDATE participants SET name = $2, initial = $3 WHERE id = $1 AND company_id = 'personal'`,
+    ['yetone', username, username.charAt(0).toUpperCase()],
+  )
 }
 
 interface SeedParticipant {
@@ -112,13 +133,12 @@ interface SeedMsg {
 const SEED_MESSAGES: SeedMsg[] = []
 
 export async function seedIfEmpty(): Promise<void> {
-  // Always make sure the dev account exists so login works on a fresh DB.
-  // Email: yetone@dev.local  Password: cumora-dev (DEV ONLY).
   await ensureDevUser()
 
   const { rows } = await pool.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM conversations')
   const count = Number(rows[0]?.count ?? '0')
   if (count > 0) {
+    await syncLocalParticipant()
     console.log(`[seed] skipping — ${count} conversations already in DB`)
     return
   }
@@ -178,4 +198,5 @@ export async function seedIfEmpty(): Promise<void> {
   } finally {
     client.release()
   }
+  await syncLocalParticipant()
 }

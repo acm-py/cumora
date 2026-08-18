@@ -26,9 +26,12 @@ const PRESETS: ServerPreset[] = [
 ]
 
 export function AuthScreen() {
-  const [busy, setBusy] = useState<'google' | 'github' | 'apple' | null>(null)
+  const [busy, setBusy] = useState<'google' | 'github' | 'apple' | 'local' | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [picker, setPicker] = useState(false)
+  const [localPasswordEnabled, setLocalPasswordEnabled] = useState(false)
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
 
   // AuthGate strips a successful fragment after consuming it. A failure
   // fragment looks like `#token=&companyId=&error=...` — surface that
@@ -37,6 +40,12 @@ export function AuthScreen() {
     const params = new URLSearchParams(location.hash.replace(/^#/, ''))
     const error = params.get('error')
     if (error) setErr(decodeURIComponent(error))
+  }, [])
+
+  useEffect(() => {
+    void api.authConfig()
+      .then((config) => setLocalPasswordEnabled(config.local_password_enabled))
+      .catch(() => setLocalPasswordEnabled(false))
   }, [])
 
   // Re-arm the sign-in buttons when the user returns to this window after
@@ -82,6 +91,23 @@ export function AuthScreen() {
       } else {
         setErr(msg)
       }
+      setBusy(null)
+    }
+  }
+
+  async function goLocal(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!username.trim() || !password || busy !== null) return
+    setBusy('local'); setErr(null)
+    try {
+      const result = await api.authLocalLogin({ username: username.trim(), password })
+      useAuth.getState().setSession(
+        result.token,
+        { id: result.user.id, email: result.user.email, name: result.user.displayName, providers: ['local'] },
+        result.companyId,
+      )
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : 'sign-in failed')
       setBusy(null)
     }
   }
@@ -176,6 +202,40 @@ export function AuthScreen() {
           </div>
         </div>
         <div className="w-full flex flex-col gap-3">
+          {localPasswordEnabled && (
+            <form onSubmit={goLocal} className="flex flex-col gap-2">
+              <input
+                type="text"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                placeholder="Username"
+                autoComplete="username"
+                disabled={busy !== null}
+                className="h-11 px-3 rounded-[10px] border border-ink-200 bg-white text-[14px] text-ink-800 placeholder:text-ink-300 focus:outline-none focus:border-ink-500 disabled:opacity-60"
+              />
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Password"
+                autoComplete="current-password"
+                disabled={busy !== null}
+                className="h-11 px-3 rounded-[10px] border border-ink-200 bg-white text-[14px] text-ink-800 placeholder:text-ink-300 focus:outline-none focus:border-ink-500 disabled:opacity-60"
+              />
+              <button
+                type="submit"
+                disabled={busy !== null || !username.trim() || !password}
+                className="h-11 rounded-[10px] bg-ink-800 hover:bg-ink-700 text-white transition-colors text-[14px] disabled:opacity-60"
+              >
+                {busy === 'local' ? 'Signing in...' : 'Sign in'}
+              </button>
+              <div className="flex items-center gap-3 py-1 text-[11px] text-ink-300">
+                <span className="h-px flex-1 bg-ink-100" />
+                <span>or</span>
+                <span className="h-px flex-1 bg-ink-100" />
+              </div>
+            </form>
+          )}
           {/* Sign in with Apple — iOS-only for now. Apple Review
               Guideline 4.8 requires SIWA be offered as an equivalent
               option whenever an iOS app exposes any third-party
